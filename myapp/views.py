@@ -1,6 +1,72 @@
 from django.shortcuts import render,redirect
-from .models import User,Product,Wishlist,Cart
+from .models import User,Product,Wishlist,Cart,Transaction
+from .paytm import generate_checksum, verify_checksum
+from django.views.decorators.csrf import csrf_exempt
+from django.conf import settings
 # Create your views here.
+
+def initiate_payment(request):
+	user=User.objects.get(email=request.session['email'])
+	try:
+		amount = int (request.POST['amount'])
+	except:
+		return render(request, 'cart.html', context={'error': 'Wrong Accound Details or amount'})
+
+	transaction = Transaction.objects.create(made_by=user,amount=amount)
+	transaction.save()
+	merchant_key = settings.PAYTM_SECRET_KEY
+
+	params = (
+        ('MID', settings.PAYTM_MERCHANT_ID),
+        ('ORDER_ID', str(transaction.order_id)),
+        ('CUST_ID', str("chandravadiyashivani@gmail,com")),
+        ('TXN_AMOUNT', str(transaction.amount)),
+        ('CHANNEL_ID', settings.PAYTM_CHANNEL_ID),
+        ('WEBSITE', settings.PAYTM_WEBSITE),
+    # ('EMAIL', request.user.email),
+    # ('MOBILE_N0', '9911223388'),
+    ('INDUSTRY_TYPE_ID', settings.PAYTM_INDUSTRY_TYPE_ID),
+    ('CALLBACK_URL', 'http://localhost:8000/callback/'),
+    # ('PAYMENT_MODE_ONLY', 'NO'),
+    )
+
+	paytm_params = dict(params)
+	checksum = generate_checksum(paytm_params, merchant_key)
+
+	transaction.checksum = checksum
+	transaction.save()
+
+	carts=Cart.objects.filter(user=user)
+	for i in carts:
+		i.status="paid"
+		i.save()
+
+	paytm_params['CHECKSUMHASH'] = checksum
+	print('SENT: ', checksum)
+	return render(request, 'redirect.html', context=paytm_params)
+
+@csrf_exempt
+def callback(request):
+    if request.method == 'POST':
+        received_data = dict(request.POST)
+        paytm_params = {}
+        paytm_checksum = received_data['CHECKSUMHASH'][0]
+        for key, value in received_data.items():
+            if key == 'CHECKSUMHASH':
+                paytm_checksum = value[0]
+            else:
+                paytm_params[key] = str(value[0])
+        # Verify checksum
+        is_valid_checksum = verify_checksum(paytm_params, settings.PAYTM_SECRET_KEY, str(paytm_checksum))
+        if is_valid_checksum:
+            received_data['message'] = "Checksum Matched"
+        else:
+            received_data['message'] = "Checksum Mismatched"
+            return render(request, 'callback.html', context=received_data)
+        return render(request, 'callback.html', context=received_data)
+
+
+
 def index(request):
 	return render(request,'index.html')
 
@@ -68,7 +134,7 @@ def login(request):
 				request.session['profile_pic']=user.profile_pic.url
 				wishlists=Wishlist.objects.filter(user=user)
 				request.session['wishlist_count']=len(wishlists)
-				carts=Cart.objects.filter(user=user)
+				carts=Cart.objects.filter(user=user,status="pending")
 				net_price=0
 				for i in carts:
 					net_price=net_price+i.total_price
@@ -195,7 +261,7 @@ def add_to_cart(request,pk):
 def cart(request):
 	net_price=0
 	user=User.objects.get(email=request.session['email'])
-	carts=Cart.objects.filter(user=user)
+	carts=Cart.objects.filter(user=user,status="pending")
 	for i in carts:
 		net_price=net_price+i.total_price
 	request.session['net_price']=net_price
